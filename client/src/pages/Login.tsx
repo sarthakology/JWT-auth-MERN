@@ -5,7 +5,8 @@ import { useNavigate } from 'react-router-dom';
 interface LoginResponse {
     message: string;
     name?: string;
-    token?: string; // Add the token to the response type
+    accessToken?: string; // Add the accessToken to the response type
+    refreshToken?: string; // Add the refreshToken to the response type
 }
 
 const Login = (props: { setName: (name: string) => void }) => {
@@ -16,31 +17,22 @@ const Login = (props: { setName: (name: string) => void }) => {
 
     const submitData = async (e: SyntheticEvent) => {
         e.preventDefault();
-
+    
         try {
             const response = await axios.post<LoginResponse>('http://localhost:2000/api/login', 
-                {
-                    email,
-                    password
-                },
-                {
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
-                }
+                { email, password },
+                { headers: { 'Content-Type': 'application/json' } }
             );
-
-            if (response.data.message === 'success' && response.data.token) {
+    
+            if (response.data.message === 'success' && response.data.accessToken && response.data.refreshToken) {
                 setMessage("Login successful!");
-
-                // Save the token to local storage
-                localStorage.setItem('token', response.data.token);
-                
-
-                if (response.data.name) {
-                    props.setName(response.data.name);
-                }
-                navigate('/'); // Navigate to home page after successful login
+    
+                // Save tokens to local storage
+                localStorage.setItem('accessToken', response.data.accessToken);
+                localStorage.setItem('refreshToken', response.data.refreshToken);
+    
+                props.setName(response.data.name || '');
+                navigate('/'); // Navigate to home page
             } else {
                 setMessage("An unexpected error occurred.");
             }

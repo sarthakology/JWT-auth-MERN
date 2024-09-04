@@ -1,11 +1,28 @@
 // Import required modules
-const router = require('express').Router(); // Creates a new router object to handle routes
+const router = require('express').Router();
 const bcrypt = require('bcryptjs'); // Library for hashing and comparing passwords
-const User = require('../models/user.js'); // User model for interacting with MongoDB
-const jwt = require('jsonwebtoken'); // Library for generating and verifying JSON Web Tokens (JWT)
-require('dotenv').config(); // Load environment variables from the .env file
+const jwt = require('jsonwebtoken'); // Library for generating and verifying JWTs
+const User = require('../models/user.js'); // Import the User model to interact with MongoDB
+require('dotenv').config(); // Load environment variables from .env file
 
-const JWT_SECRET = process.env.JWT_SECRET; // Access the JWT secret from environment variables
+// JWT secret keys from environment variables
+const JWT_SECRET = process.env.JWT_SECRET; // Secret key for access tokens
+const REFRESH_SECRET = process.env.REFRESH_SECRET; // Secret key for refresh tokens
+
+// In-memory storage for refresh tokens (can be replaced by a database)
+const refreshTokens = [];
+
+// Function to generate an access token with a short expiration time (e.g., 15 minutes)
+const generateAccessToken = (user) => {
+    return jwt.sign({ _id: user._id }, JWT_SECRET, { expiresIn: '5s' });
+};
+
+// Function to generate a refresh token (typically longer-lived)
+const generateRefreshToken = (user) => {
+    const refreshToken = jwt.sign({ _id: user._id }, REFRESH_SECRET);
+    refreshTokens.push(refreshToken); // Store the refresh token in memory (can be stored in a database)
+    return refreshToken;
+};
 
 // Route to register a new user
 router.post('/register', async (req, res) => {
@@ -21,104 +38,94 @@ router.post('/register', async (req, res) => {
         password: hashedPassword
     });
 
-    // Save the new user to the database
-    const response = await newUser.save();
-    // Exclude the password field from the response
-    const { password, ...data } = await response.toJSON();
-    // Send the user data as a response
-    res.send(data);
+    try {
+        // Save the new user to the database
+        const response = await newUser.save();
+        // Exclude the password field from the response
+        const { password, ...data } = await response.toJSON();
+        // Send the user data as a response
+        res.send(data);
+    } catch (error) {
+        // Return an error message if user registration fails
+        res.status(400).send({ message: 'Error registering user', error });
+    }
 });
+
+// Route to log in a user
 router.post('/login', async (req, res) => {
     // Find the user by email
     const user = await User.findOne({ email: req.body.email });
 
     // If the user is not found, return a 404 error
     if (!user) {
-        return res.status(404).send({
-            message: 'user not found'
-        });
+        return res.status(404).send({ message: 'user not found' });
     }
 
     // Compare the provided password with the stored hashed password
     if (!await bcrypt.compare(req.body.password, user.password)) {
-        return res.status(400).send({
-            message: 'invalid credentials'
-        });
+        return res.status(400).send({ message: 'invalid credentials' });
     }
 
-    // Generate a JWT token with the user's ID
-    const token = jwt.sign({ _id: user._id }, JWT_SECRET);
+    // Generate an access token and refresh token
+    const accessToken = generateAccessToken(user); // Short-lived access token
+    const refreshToken = generateRefreshToken(user); // Long-lived refresh token
 
-    // Send the token in the response
+    // Send the tokens in the response
     res.send({
         message: 'success',
-        token: token
+        accessToken: accessToken,
+        refreshToken: refreshToken
     });
 });
 
-// // Route to log in a user
-// router.post('/login', async (req, res) => {
-//     // Find the user by email
-//     const user = await User.findOne({ email: req.body.email });
+// Route to refresh an access token using a refresh token
+router.post('/token', (req, res) => {
+    // Extract the refresh token from the request body
+    const refreshToken = req.body.token;
 
-//     // If the user is not found, return a 404 error
-//     if (!user) {
-//         return res.status(404).send({
-//             message: 'user not found'
-//         });
-//     }
+    // If no refresh token is provided, return a 401 error (unauthenticated)
+    if (!refreshToken) {
+        return res.status(401).send({ message: 'unauthenticated' });
+    }
 
-//     // Compare the provided password with the stored hashed password
-//     if (!await bcrypt.compare(req.body.password, user.password)) {
-//         return res.status(400).send({
-//             message: 'invalid credentials'
-//         });
-//     }
+    // If the provided refresh token is not valid (not in the stored list), return a 403 error (forbidden)
+    if (!refreshTokens.includes(refreshToken)) {
+        return res.status(403).send({ message: 'invalid refresh token' });
+    }
 
-//     // Generate a JWT token with the user's ID
-//     const token = jwt.sign({ _id: user._id }, JWT_SECRET);
+    // Verify the validity of the refresh token
+    jwt.verify(refreshToken, REFRESH_SECRET, (err, user) => {
+        if (err) {
+            // If the token is invalid, return a 403 error
+            return res.status(403).send({ message: 'invalid refresh token' });
+        }
 
-//     // Set the JWT token as an HTTP-only cookie with a 1-min expiration
-//     res.cookie('jwt', token, {
-//         httpOnly: true,
-//         maxAge: 60 * 1000 // 1 min
-//     });
-
-//     // Send a success message
-//     res.send({
-//         message: 'success'
-//     });
-// });
+        // If valid, generate a new access token
+        const accessToken = generateAccessToken(user);
+        // Send the new access token as a response
+        res.send({ accessToken });
+    });
+});
 
 // Route to get authenticated user details
 router.get('/user', async (req, res) => {
+    // Retrieve the JWT access token from the Authorization header
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1]; // Extract token from 'Bearer <token>'
+
+    // If no token is provided, return a 401 error (unauthenticated)
+    if (!token) {
+        return res.status(401).send({ message: 'unauthenticated' });
+    }
+
     try {
-        // Retrieve the JWT token from the Authorization header
-        const authHeader = req.headers['authorization'];
-        const token = authHeader && authHeader.split(' ')[1]; // Extract token from 'Bearer <token>'
-
-        if (!token) {
-            return res.status(401).send({
-                message: 'unauthenticated'
-            });
-        }
-
-        // Verify the JWT token and extract the claims (user ID)
+        // Verify the JWT token and extract the user's ID from the claims
         const claims = jwt.verify(token, JWT_SECRET);
-
-        // If the token is invalid, return a 401 error
-        if (!claims) {
-            return res.status(401).send({
-                message: 'unauthenticated'
-            });
-        }
 
         // Find the user by ID (extracted from the token claims)
         const user = await User.findOne({ _id: claims._id });
         if (!user) {
-            return res.status(404).send({
-                message: 'user not found'
-            });
+            return res.status(404).send({ message: 'user not found' });
         }
 
         // Exclude the password field from the response
@@ -127,52 +134,9 @@ router.get('/user', async (req, res) => {
         // Send the user data as a response
         res.send(data);
     } catch (e) {
-        console.error('Error:', e);
-        // If any error occurs (e.g., invalid token), return a 401 error
-        return res.status(401).send({
-            message: 'unauthenticated'
-        });
+        // If token verification fails, return a 401 error (unauthenticated)
+        return res.status(401).send({ message: 'unauthenticated' });
     }
-});
-// router.get('/user', async (req, res) => {
-//     try {
-//         // Retrieve the JWT token from the request cookies
-//         const cookie = req.cookies['jwt'];
-
-//         // Verify the JWT token and extract the claims (user ID)
-//         const claims = jwt.verify(cookie, JWT_SECRET);
-
-//         // If the token is invalid, return a 401 error
-//         if (!claims) {
-//             return res.status(401).send({
-//                 message: 'unauthenticated'
-//             });
-//         }
-
-//         // Find the user by ID (extracted from the token claims)
-//         const user = await User.findOne({ _id: claims._id });
-//         // Exclude the password field from the response
-//         const { password, ...data } = await user.toJSON();
-
-//         // Send the user data as a response
-//         res.send(data);
-//     } catch (e) {
-//         // If any error occurs (e.g., invalid token), return a 401 error
-//         return res.status(401).send({
-//             message: 'unauthenticated'
-//         });
-//     }
-// });
-
-// Route to log out the user
-router.post('/logout', (req, res) => {
-    // Clear the JWT cookie by setting it with an empty value and a maxAge of 0
-    // res.cookie('jwt', '', { maxAge: 0 });
-
-    // Send a success message
-    res.send({
-        message: 'success'
-    });
 });
 
 // Export the router to be used in other parts of the application
